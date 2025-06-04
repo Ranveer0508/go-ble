@@ -212,10 +212,6 @@ func (c DeviceCharacteristic) WriteWithoutResponse(p []byte) (n int, err error) 
 // notification with a new value every time the value of the characteristic
 // changes.
 func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) error {
-	if callback == nil {
-		return errors.New("must provide a callback for EnableNotifications")
-	}
-
 	c.callback = callback
 	c.service.device.prph.SetNotify(true, c.characteristic)
 
