@@ -245,6 +245,11 @@ type DeviceCharacteristic struct {
 	properties     genericattributeprofile.GattCharacteristicProperties
 
 	service DeviceService
+
+	// Added for toggling support
+	handler              *foundation.TypedEventHandler
+	notifyMode           NotificationMode
+	notificationsEnabled bool
 }
 
 // UUID returns the UUID for this DeviceCharacteristic.
@@ -388,172 +393,124 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 	return nil
 }
 
-// EnableNotificationsWithMode enables notifications in the Client Characteristic
-// Configuration Descriptor (CCCD). This means that most peripherals will send a
-// notification with a new value every time the value of the characteristic
-// changes. And you can select the notify/indicate mode as you need.
-// func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode, callback func(buf []byte)) error {
-// 	configValue := genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueNone
-// 	if mode == NotificationModeIndicate {
-// 		if c.properties&genericattributeprofile.GattCharacteristicPropertiesIndicate == 0 {
-// 			return errNoIndicate
-// 		}
-// 		// set to indicate mode
-// 		configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueIndicate
-// 	} else if mode == NotificationModeNotify {
-// 		if c.properties&genericattributeprofile.GattCharacteristicPropertiesNotify == 0 {
-// 			return errNoNotify
-// 		}
-// 		// set to notify mode
-// 		configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueNotify
-// 	} else {
-// 		return errInvalidNotificationMode
-// 	}
-
-// 	// listen value changed event
-// 	// TypedEventHandler<GattCharacteristic,GattValueChangedEventArgs>
-// 	guid := winrt.ParameterizedInstanceGUID(foundation.GUIDTypedEventHandler, genericattributeprofile.SignatureGattCharacteristic, genericattributeprofile.SignatureGattValueChangedEventArgs)
-// 	valueChangedEventHandler := foundation.NewTypedEventHandler(ole.NewGUID(guid), func(instance *foundation.TypedEventHandler, sender, args unsafe.Pointer) {
-// 		valueChangedEvent := (*genericattributeprofile.GattValueChangedEventArgs)(args)
-
-// 		buf, err := valueChangedEvent.GetCharacteristicValue()
-// 		if err != nil {
-// 			return
-// 		}
-
-// 		reader, err := streams.DataReaderFromBuffer(buf)
-// 		if err != nil {
-// 			return
-// 		}
-// 		defer reader.Release()
-
-// 		buflen, err := buf.GetLength()
-// 		if err != nil {
-// 			return
-// 		}
-
-// 		data, err := reader.ReadBytes(buflen)
-// 		if err != nil {
-// 			return
-// 		}
-
-// 		callback(data)
-// 	})
-// 	_, err := c.characteristic.AddValueChanged(valueChangedEventHandler)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	writeOp, err := c.characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(configValue)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	// IAsyncOperation<GattCommunicationStatus>
-// 	if err := awaitAsyncOperation(writeOp, genericattributeprofile.SignatureGattCommunicationStatus); err != nil {
-// 		return err
-// 	}
-
-// 	res, err := writeOp.GetResults()
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	result := genericattributeprofile.GattCommunicationStatus(uintptr(res))
-
-// 	if result != genericattributeprofile.GattCommunicationStatusSuccess {
-// 		return errEnableNotificationsFailed
-// 	}
-
-// 	return nil
-// }
-
-func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode, callback func(buf []byte)) error {
+func (c *DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode, callback func(buf []byte)) error {
 	var configValue genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValue
 
+	// Disable notifications if callback is nil
 	if callback == nil {
-		// Disable notifications by setting to None
-		configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueNone
-	} else {
-		// Enable notify or indicate as requested
-		if mode == NotificationModeIndicate {
-			if c.properties&genericattributeprofile.GattCharacteristicPropertiesIndicate == 0 {
-				return errNoIndicate
+		// Disable notifications only if previously enabled
+		if c.notificationsEnabled {
+			configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueNone
+
+			writeOp, err := c.characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(configValue)
+			if err != nil {
+				return err
 			}
-			configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueIndicate
-		} else if mode == NotificationModeNotify {
-			if c.properties&genericattributeprofile.GattCharacteristicPropertiesNotify == 0 {
-				return errNoNotify
+			if err := awaitAsyncOperation(writeOp, genericattributeprofile.SignatureGattCommunicationStatus); err != nil {
+				return err
 			}
-			configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueNotify
-		} else {
-			return errInvalidNotificationMode
+			res, err := writeOp.GetResults()
+			if err != nil {
+				return err
+			}
+			status := genericattributeprofile.GattCommunicationStatus(uintptr(res))
+			if status != genericattributeprofile.GattCommunicationStatusSuccess {
+				return errEnableNotificationsFailed
+			}
+
+			// Release the existing handler
+			if c.handler != nil {
+				c.handler.Release()
+				c.handler = nil
+			}
+			c.notificationsEnabled = false
 		}
+		return nil
 	}
 
-	// If we're disabling notifications, skip event handler setup
-	if callback != nil {
-		// TypedEventHandler<GattCharacteristic,GattValueChangedEventArgs>
-		guid := winrt.ParameterizedInstanceGUID(
-			foundation.GUIDTypedEventHandler,
-			genericattributeprofile.SignatureGattCharacteristic,
-			genericattributeprofile.SignatureGattValueChangedEventArgs,
-		)
-
-		valueChangedEventHandler := foundation.NewTypedEventHandler(
-			ole.NewGUID(guid),
-			func(instance *foundation.TypedEventHandler, sender, args unsafe.Pointer) {
-				valueChangedEvent := (*genericattributeprofile.GattValueChangedEventArgs)(args)
-
-				buf, err := valueChangedEvent.GetCharacteristicValue()
-				if err != nil {
-					return
-				}
-
-				reader, err := streams.DataReaderFromBuffer(buf)
-				if err != nil {
-					return
-				}
-				defer reader.Release()
-
-				buflen, err := buf.GetLength()
-				if err != nil {
-					return
-				}
-
-				data, err := reader.ReadBytes(buflen)
-				if err != nil {
-					return
-				}
-
-				callback(data)
-			},
-		)
-
-		_, err := c.characteristic.AddValueChanged(valueChangedEventHandler)
-		if err != nil {
-			return err
+	// Setup config for enabling notifications
+	switch mode {
+	case NotificationModeNotify:
+		if c.properties&genericattributeprofile.GattCharacteristicPropertiesNotify == 0 {
+			return errNoNotify
 		}
+		configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueNotify
+	case NotificationModeIndicate:
+		if c.properties&genericattributeprofile.GattCharacteristicPropertiesIndicate == 0 {
+			return errNoIndicate
+		}
+		configValue = genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueIndicate
+	default:
+		return errInvalidNotificationMode
 	}
 
-	// Write client config descriptor (enable or disable)
+	// If previously enabled, remove old handler before adding new
+	if c.handler != nil {
+		c.handler.Release()
+		c.handler = nil
+	}
+
+	// Create and attach event handler
+	guid := winrt.ParameterizedInstanceGUID(
+		foundation.GUIDTypedEventHandler,
+		genericattributeprofile.SignatureGattCharacteristic,
+		genericattributeprofile.SignatureGattValueChangedEventArgs,
+	)
+
+	handler := foundation.NewTypedEventHandler(
+		ole.NewGUID(guid),
+		func(instance *foundation.TypedEventHandler, sender, args unsafe.Pointer) {
+			valueChangedEvent := (*genericattributeprofile.GattValueChangedEventArgs)(args)
+
+			buf, err := valueChangedEvent.GetCharacteristicValue()
+			if err != nil {
+				return
+			}
+			reader, err := streams.DataReaderFromBuffer(buf)
+			if err != nil {
+				return
+			}
+			defer reader.Release()
+
+			buflen, err := buf.GetLength()
+			if err != nil {
+				return
+			}
+
+			data, err := reader.ReadBytes(buflen)
+			if err != nil {
+				return
+			}
+
+			callback(data)
+		},
+	)
+
+	_, err := c.characteristic.AddValueChanged(handler)
+	if err != nil {
+		return err
+	}
+
+	// Apply configuration
 	writeOp, err := c.characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(configValue)
 	if err != nil {
 		return err
 	}
-
 	if err := awaitAsyncOperation(writeOp, genericattributeprofile.SignatureGattCommunicationStatus); err != nil {
 		return err
 	}
-
 	res, err := writeOp.GetResults()
 	if err != nil {
 		return err
 	}
-
-	if genericattributeprofile.GattCommunicationStatus(uintptr(res)) != genericattributeprofile.GattCommunicationStatusSuccess {
+	status := genericattributeprofile.GattCommunicationStatus(uintptr(res))
+	if status != genericattributeprofile.GattCommunicationStatusSuccess {
 		return errEnableNotificationsFailed
 	}
 
+	// Track state
+	c.handler = handler
+	c.notifyMode = mode
+	c.notificationsEnabled = true
 	return nil
 }
